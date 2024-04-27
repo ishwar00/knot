@@ -1,5 +1,5 @@
 use core::panic;
-use std::sync::Once;
+use std::{ffi::c_void, sync::Once};
 use v8;
 mod ops;
 
@@ -9,9 +9,21 @@ const KNOT_INIT: Once = Once::new();
 pub struct Knot<'a, 'b> {
     context: v8::Local<'a, v8::Context>,
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
+    tasks_queue: &'a mut Vec<Task>,
 }
-
+type Task = v8::Global<v8::Value>;
 type V8Instance = v8::OwnedIsolate;
+
+type JsValueRef = v8::Global<v8::Value>;
+
+enum TaskKind {
+    Scheduled {
+        callback: JsValueRef,
+        interval: i32,
+        args: Vec<JsValueRef>,
+        period: bool,
+    },
+}
 
 impl<'a, 'b> Knot<'a, 'b>
 where
@@ -27,6 +39,54 @@ where
 
         let isolate = v8::Isolate::new(v8::CreateParams::default());
         isolate
+    }
+
+    pub fn new(handle_scope: &'b mut v8::HandleScope<'a, ()>) -> Self {
+        let global_template = Knot::create_glob_template(handle_scope);
+
+        let knot_template = v8::ObjectTemplate::new(handle_scope);
+        knot_template.set(
+            v8::String::new(handle_scope, "Knot").unwrap().into(),
+            global_template.into(),
+        );
+
+        let context = v8::Context::new_from_template(handle_scope, knot_template);
+        let context_scope = v8::ContextScope::new(handle_scope, context);
+        let heap_tasks_queue = Box::new(Vec::<Task>::new());
+        let tasks_queue_ptr = Box::leak(heap_tasks_queue);
+        tasks_queue_ptr.reserve(100);
+        unsafe {
+            context.set_aligned_pointer_in_embedder_data(
+                0,
+                tasks_queue_ptr as *mut Vec<Task> as *mut c_void,
+            )
+        };
+
+        Self {
+            context_scope,
+            context,
+            tasks_queue: tasks_queue_ptr,
+        }
+    }
+
+    #[tokio::main]
+    pub async fn run_tasks(&mut self) -> () {
+        let global = self.context.global(&mut self.context_scope);
+        loop {
+            if self.tasks_queue.len() <= 0 {
+                break;
+            }
+            let task = self.tasks_queue.pop().unwrap();
+            let value = v8::Local::new(&mut self.context_scope, task);
+            let callback_fn = v8::Local::<v8::Function>::try_from(value)
+                .expect("Task callback must be a function!");
+            let args = vec![];
+            callback_fn.call(&mut self.context_scope, global.into(), &args);
+        }
+    }
+
+    pub fn run_microtasks(&mut self) -> () {
+        self.context_scope.perform_microtask_checkpoint();
     }
 
     pub fn execute_script(&mut self, script: String) {
@@ -48,24 +108,6 @@ where
         }
     }
 
-    pub fn new(handle_scope: &'b mut v8::HandleScope<'a, ()>) -> Self {
-        let global_template = Knot::create_glob_template(handle_scope);
-
-        let knot_template = v8::ObjectTemplate::new(handle_scope);
-        knot_template.set(
-            v8::String::new(handle_scope, "Knot").unwrap().into(),
-            global_template.into(),
-        );
-
-        let context = v8::Context::new_from_template(handle_scope, knot_template);
-        let context_scope = v8::ContextScope::new(handle_scope, context);
-
-        Self {
-            context_scope,
-            context,
-        }
-    }
-
     fn create_glob_template<'i, 'c>(
         scope: &'c mut v8::HandleScope<'i, ()>,
     ) -> v8::Local<'i, v8::ObjectTemplate> {
@@ -73,6 +115,11 @@ where
         global.set(
             v8::String::new(scope, "log").unwrap().into(),
             v8::FunctionTemplate::new(scope, ops::print).into(),
+        );
+
+        global.set(
+            v8::String::new(scope, "schedule_task").unwrap().into(),
+            v8::FunctionTemplate::new(scope, ops::schedule_task).into(),
         );
 
         global
