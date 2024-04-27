@@ -1,21 +1,28 @@
 let a = "Hello, World!";
 
 Knot.log(a, 343);
-Knot.schedule_task(() => Knot.log("Hello from task"), 200);
+Knot.schedule_task(() => {
+    Knot.log("Hello from task");
+    new Promise((r, _) => {
+        Knot.log("Nested bruh");
+        r(45);
+    });
+}, 5000);
 
 let future = new Promise((res, _) => {
-  Knot.log("executing future");
-  res(455);
+    Knot.log("executing future");
+    res(455);
 }).then((v) => {
-  Knot.schedule_task(() => Knot.log("Hello from task then"), 200);
-  Knot.log("executing future in then: ", v);
+    Knot.schedule_task(() => Knot.log("Hello from task then"), 2000);
+    Knot.log("executing future in then: ", v);
 });
 
-/// output of above code in `Knot`
-/*
-Hello, World! 343
-executing future
-executing future in then:  455
-Hello from task then
-Hello from task
-*/
+Knot.log(future);
+
+// Hello, World! 343
+// executing future
+// [object Promise]
+// executing future in then:  455
+// Hello from task then
+// Hello from task
+// Nested bruh

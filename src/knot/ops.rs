@@ -1,6 +1,6 @@
-use std::ffi::c_void;
+use v8::{self};
 
-use v8::{self, Handle};
+use super::{task_scheduler::Task, EmbeddedData};
 
 pub fn print(
     scope: &mut v8::HandleScope,
@@ -17,7 +17,6 @@ pub fn print(
         if i + 1 < args.length() {
             arg_i.push(' ');
         }
-
         print!("{}", arg_i)
     }
     println!();
@@ -29,7 +28,7 @@ pub fn schedule_task(
     args: v8::FunctionCallbackArguments,
     mut _retval: v8::ReturnValue,
 ) -> () {
-    let timeout: i32 = args
+    let timeout: u32 = args
         .get(1)
         .to_integer(scope)
         .unwrap_or(v8::Integer::new(scope, 0))
@@ -40,9 +39,23 @@ pub fn schedule_task(
     let context = v8::HandleScope::get_current_context(scope);
     let data = context.get_aligned_pointer_from_embedder_data(0);
 
-    let task_queue = data as *mut Vec<crate::knot::Task>;
-    let task = v8::Global::new(scope, args.get(0));
+    let mut global_args = vec![];
+
+    for i in 2..args.length() {
+        let global_handle = v8::Global::new(scope, args.get(i));
+        global_args.push(global_handle);
+    }
+
+    let embedded_data = data as *mut EmbeddedData;
+    let task = Task::Scheduled {
+        callback: v8::Global::new(scope, args.get(0)),
+        interval: timeout,
+        args: global_args,
+        period: true,
+    };
+
     unsafe {
-        (*task_queue).push(task);
+        let mut knot_ptr = (*embedded_data).ptr.lock().unwrap();
+        (**knot_ptr).task_scheduler.schedule(task);
     }
 }

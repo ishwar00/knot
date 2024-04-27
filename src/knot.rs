@@ -1,28 +1,25 @@
 use core::panic;
-use std::{ffi::c_void, sync::Once};
-use v8;
+use std::{
+    ffi::c_void,
+    sync::{Arc, Mutex, Once},
+};
+use v8::{self};
+
+use self::task_scheduler::TaskScheduler;
 mod ops;
+mod task_scheduler;
 
 const KNOT_INIT: Once = Once::new();
 
-#[allow(dead_code)]
 pub struct Knot<'a, 'b> {
     context: v8::Local<'a, v8::Context>,
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
-    tasks_queue: &'a mut Vec<Task>,
+    task_scheduler: TaskScheduler,
 }
-type Task = v8::Global<v8::Value>;
 type V8Instance = v8::OwnedIsolate;
 
-type JsValueRef = v8::Global<v8::Value>;
-
-enum TaskKind {
-    Scheduled {
-        callback: JsValueRef,
-        interval: i32,
-        args: Vec<JsValueRef>,
-        period: bool,
-    },
+struct EmbeddedData<'a, 'b> {
+    ptr: Arc<Mutex<*mut Knot<'a, 'b>>>,
 }
 
 impl<'a, 'b> Knot<'a, 'b>
@@ -41,7 +38,7 @@ where
         isolate
     }
 
-    pub fn new(handle_scope: &'b mut v8::HandleScope<'a, ()>) -> Self {
+    pub fn new(handle_scope: &'b mut v8::HandleScope<'a, ()>) -> Box<Self> {
         let global_template = Knot::create_glob_template(handle_scope);
 
         let knot_template = v8::ObjectTemplate::new(handle_scope);
@@ -52,41 +49,66 @@ where
 
         let context = v8::Context::new_from_template(handle_scope, knot_template);
         let context_scope = v8::ContextScope::new(handle_scope, context);
-        let heap_tasks_queue = Box::new(Vec::<Task>::new());
-        let tasks_queue_ptr = Box::leak(heap_tasks_queue);
-        tasks_queue_ptr.reserve(100);
+        let task_scheduler = TaskScheduler::new();
+        let mut self_ = Box::new(Self {
+            context_scope,
+            context,
+            task_scheduler,
+        });
+
+        let knot_ptr = self_.as_mut() as *mut Self;
+
+        let embedded_data = Box::new(EmbeddedData {
+            ptr: Arc::new(std::sync::Mutex::new(knot_ptr)),
+        });
+
+        let embedded_data_ptr = Box::leak(embedded_data);
+
         unsafe {
             context.set_aligned_pointer_in_embedder_data(
                 0,
-                tasks_queue_ptr as *mut Vec<Task> as *mut c_void,
+                embedded_data_ptr as *mut EmbeddedData as *mut c_void,
             )
         };
 
-        Self {
-            context_scope,
-            context,
-            tasks_queue: tasks_queue_ptr,
-        }
+        self_
     }
 
-    #[tokio::main]
-    pub async fn run_tasks(&mut self) -> () {
+    pub fn run_tasks(&mut self) -> () {
         let global = self.context.global(&mut self.context_scope);
-        loop {
-            if self.tasks_queue.len() <= 0 {
-                break;
+        while let Some(task_id) = self.task_scheduler.fetch_expired_task() {
+            if let Some(task) = self.task_scheduler.fetch_task(task_id) {
+                match task {
+                    task_scheduler::Task::Scheduled { callback, args, .. } => {
+                        let value = v8::Local::new(&mut self.context_scope, callback);
+                        let callback_fn = v8::Local::<v8::Function>::try_from(value)
+                            .expect("Task callback must be a function!");
+
+                        let mut args_buff = vec![];
+                        for arg in args {
+                            let local_handle = v8::Local::new(&mut self.context_scope, arg);
+                            args_buff.push(local_handle);
+                        }
+
+                        callback_fn.call(&mut self.context_scope, global.into(), &args_buff);
+                    }
+                }
             }
-            let task = self.tasks_queue.pop().unwrap();
-            let value = v8::Local::new(&mut self.context_scope, task);
-            let callback_fn = v8::Local::<v8::Function>::try_from(value)
-                .expect("Task callback must be a function!");
-            let args = vec![];
-            callback_fn.call(&mut self.context_scope, global.into(), &args);
         }
     }
 
     pub fn run_microtasks(&mut self) -> () {
         self.context_scope.perform_microtask_checkpoint();
+    }
+
+    pub fn run_event_loop(&mut self) -> () {
+        loop {
+            self.run_microtasks();
+            self.run_tasks();
+            if !self.task_scheduler.has_pending_tasks() {
+                break;
+            }
+        }
     }
 
     pub fn execute_script(&mut self, script: String) {

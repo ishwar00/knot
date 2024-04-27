@@ -41,6 +41,5 @@ fn main() -> () {
         .unwrap_or_else(|err| panic!("Failed to open {}: {}", file, err));
 
     let _ = knot.execute_script(source);
-    knot.run_microtasks();
-    knot.run_tasks();
+    knot.run_event_loop();
 }
