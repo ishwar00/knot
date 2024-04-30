@@ -66,21 +66,17 @@ pub fn forget_task(
     args: v8::FunctionCallbackArguments,
     mut _retval: v8::ReturnValue,
 ) -> () {
-    let task_id: i32 = args
-        .get(0)
-        .to_integer(scope)
-        .unwrap_or(v8::Integer::new(scope, 0))
-        .to_rust_string_lossy(scope)
-        .parse()
-        .unwrap_or(0);
+    if let Some(handle) = args.get(0).to_integer(scope) {
+        if let Ok(task_id) = handle.to_rust_string_lossy(scope).parse::<i32>() {
+            let context = v8::HandleScope::get_current_context(scope);
+            let data = context.get_aligned_pointer_from_embedder_data(0);
 
-    let context = v8::HandleScope::get_current_context(scope);
-    let data = context.get_aligned_pointer_from_embedder_data(0);
+            let embedded_data = data as *mut EmbeddedData;
 
-    let embedded_data = data as *mut EmbeddedData;
-
-    unsafe {
-        let mut knot_ptr = (*embedded_data).ptr.lock().unwrap();
-        (**knot_ptr).scheduler.forget(task_id);
-    };
+            unsafe {
+                let mut knot_ptr = (*embedded_data).ptr.lock().unwrap();
+                (**knot_ptr).scheduler.forget(task_id);
+            };
+        }
+    }
 }

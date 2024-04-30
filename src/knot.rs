@@ -103,6 +103,7 @@ where
 
     pub fn run_event_loop(&mut self) -> () {
         loop {
+            // TODO: not quite correct, run microtasks checkpoint after every task.
             self.run_microtasks();
             self.run_tasks();
             if !self.scheduler.has_pending_tasks() {
