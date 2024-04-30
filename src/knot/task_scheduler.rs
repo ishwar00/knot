@@ -43,13 +43,13 @@ impl TaskScheduler {
         expired.pop_front()
     }
 
-    pub fn remove(&mut self, task_id: i32) -> () {
+    pub fn forget(&mut self, task_id: i32) -> () {
         // we are not removing from expired container
         // will simply ignore if we could not find task in HashMap
         self.tasks.remove(&task_id);
     }
 
-    pub fn schedule(&mut self, task: Task) -> () {
+    pub fn schedule(&mut self, task: Task) -> i32 {
         let task_id = self.task_id();
         let Task::Scheduled { interval, .. } = &task;
         let interval = (*interval).into();
@@ -61,6 +61,7 @@ impl TaskScheduler {
             expired.push_back(task_id);
         });
         self.tasks.insert(task_id, task);
+        task_id
     }
 }
 
@@ -69,6 +70,5 @@ pub enum Task {
         callback: JsValueRef,
         interval: u32,
         args: Vec<JsValueRef>,
-        period: bool,
     },
 }

@@ -14,7 +14,7 @@ const KNOT_INIT: Once = Once::new();
 pub struct Knot<'a, 'b> {
     context: v8::Local<'a, v8::Context>,
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
-    task_scheduler: TaskScheduler,
+    scheduler: TaskScheduler,
 }
 type V8Instance = v8::OwnedIsolate;
 
@@ -53,7 +53,7 @@ where
         let mut self_ = Box::new(Self {
             context_scope,
             context,
-            task_scheduler,
+            scheduler: task_scheduler,
         });
 
         let knot_ptr = self_.as_mut() as *mut Self;
@@ -76,8 +76,8 @@ where
 
     pub fn run_tasks(&mut self) -> () {
         let global = self.context.global(&mut self.context_scope);
-        while let Some(task_id) = self.task_scheduler.fetch_expired_task() {
-            if let Some(task) = self.task_scheduler.fetch_task(task_id) {
+        while let Some(task_id) = self.scheduler.fetch_expired_task() {
+            if let Some(task) = self.scheduler.fetch_task(task_id) {
                 match task {
                     task_scheduler::Task::Scheduled { callback, args, .. } => {
                         let value = v8::Local::new(&mut self.context_scope, callback);
@@ -105,7 +105,7 @@ where
         loop {
             self.run_microtasks();
             self.run_tasks();
-            if !self.task_scheduler.has_pending_tasks() {
+            if !self.scheduler.has_pending_tasks() {
                 break;
             }
         }
@@ -134,6 +134,7 @@ where
         scope: &'c mut v8::HandleScope<'i, ()>,
     ) -> v8::Local<'i, v8::ObjectTemplate> {
         let global = v8::ObjectTemplate::new(scope);
+
         global.set(
             v8::String::new(scope, "log").unwrap().into(),
             v8::FunctionTemplate::new(scope, ops::print).into(),
@@ -142,6 +143,11 @@ where
         global.set(
             v8::String::new(scope, "schedule_task").unwrap().into(),
             v8::FunctionTemplate::new(scope, ops::schedule_task).into(),
+        );
+
+        global.set(
+            v8::String::new(scope, "forget_task").unwrap().into(),
+            v8::FunctionTemplate::new(scope, ops::forget_task).into(),
         );
 
         global

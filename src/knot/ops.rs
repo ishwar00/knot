@@ -26,7 +26,7 @@ pub fn print(
 pub fn schedule_task(
     scope: &mut v8::HandleScope,
     args: v8::FunctionCallbackArguments,
-    mut _retval: v8::ReturnValue,
+    mut retval: v8::ReturnValue,
 ) -> () {
     let timeout: u32 = args
         .get(1)
@@ -51,11 +51,36 @@ pub fn schedule_task(
         callback: v8::Global::new(scope, args.get(0)),
         interval: timeout,
         args: global_args,
-        period: true,
     };
+
+    let task_id = unsafe {
+        let mut knot_ptr = (*embedded_data).ptr.lock().unwrap();
+        (**knot_ptr).scheduler.schedule(task)
+    };
+
+    retval.set_int32(task_id);
+}
+
+pub fn forget_task(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut _retval: v8::ReturnValue,
+) -> () {
+    let task_id: i32 = args
+        .get(0)
+        .to_integer(scope)
+        .unwrap_or(v8::Integer::new(scope, 0))
+        .to_rust_string_lossy(scope)
+        .parse()
+        .unwrap_or(0);
+
+    let context = v8::HandleScope::get_current_context(scope);
+    let data = context.get_aligned_pointer_from_embedder_data(0);
+
+    let embedded_data = data as *mut EmbeddedData;
 
     unsafe {
         let mut knot_ptr = (*embedded_data).ptr.lock().unwrap();
-        (**knot_ptr).task_scheduler.schedule(task);
-    }
+        (**knot_ptr).scheduler.forget(task_id);
+    };
 }
