@@ -2,6 +2,7 @@ use core::panic;
 use std::collections::HashMap;
 
 use crate::knot::Knot;
+use knot::tasks::Task;
 use v8;
 
 mod knot;
@@ -40,6 +41,9 @@ fn main() -> () {
     let source = std::fs::read_to_string(&file)
         .unwrap_or_else(|err| panic!("Failed to open {}: {}", file, err));
 
-    let _ = knot.execute_script(source);
+    let task = Task::Script { source };
+    let task_id = knot.register(task);
+    knot.enqueue(task_id);
+
     knot.run_event_loop();
 }

@@ -2,19 +2,23 @@ use core::panic;
 use std::{
     ffi::c_void,
     sync::{Arc, Mutex, Once},
+    thread::sleep,
+    time,
 };
 use v8::{self};
 
-use self::task_scheduler::TaskScheduler;
+use self::tasks::{Task, TaskId, TasksQueue, TasksTable};
+
 mod ops;
-mod task_scheduler;
+pub(crate) mod tasks;
 
 const KNOT_INIT: Once = Once::new();
 
 pub struct Knot<'a, 'b> {
     context: v8::Local<'a, v8::Context>,
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
-    scheduler: TaskScheduler,
+    tasks_table: Arc<Mutex<TasksTable>>,
+    tasks_queue: Arc<Mutex<TasksQueue>>,
 }
 type V8Instance = v8::OwnedIsolate;
 
@@ -49,11 +53,11 @@ where
 
         let context = v8::Context::new_from_template(handle_scope, knot_template);
         let context_scope = v8::ContextScope::new(handle_scope, context);
-        let task_scheduler = TaskScheduler::new();
         let mut self_ = Box::new(Self {
             context_scope,
             context,
-            scheduler: task_scheduler,
+            tasks_table: Arc::new(Mutex::new(TasksTable::new())),
+            tasks_queue: Arc::new(Mutex::new(TasksQueue::new())),
         });
 
         let knot_ptr = self_.as_mut() as *mut Self;
@@ -74,19 +78,71 @@ where
         self_
     }
 
-    pub fn run_tasks(&mut self) -> () {
-        let global = self.context.global(&mut self.context_scope);
-        while let Some(task_id) = self.scheduler.fetch_expired_task() {
-            if let Some(task) = self.scheduler.fetch_task(task_id) {
+    pub fn register(&mut self, task: Task) -> TaskId {
+        self.tasks_table.lock().unwrap().register(task)
+    }
+
+    pub fn enqueue(&mut self, item: TaskId) -> () {
+        self.tasks_queue.lock().unwrap().0.push_back(item);
+    }
+
+    fn run_microtasks(&mut self) -> () {
+        self.context_scope.perform_microtask_checkpoint();
+    }
+
+    fn has_tasks(&self) -> bool {
+        self.tasks_queue.lock().unwrap().0.len() > 0
+    }
+
+    pub fn run_event_loop(&mut self) -> () {
+        while self.has_tasks() {
+            // Just to make sure that we don't hold onto the lock longer than required
+            {
+                let task_id = {
+                    let mut tasks_queue = self.tasks_queue.lock().unwrap();
+                    let task_id = tasks_queue.0.pop_front().unwrap();
+                    tasks_queue.dequeue(); // remove the task from the queue
+                    task_id
+                };
+                let mut tasks_table = self.tasks_table.lock().unwrap();
+                let task = tasks_table
+                    .as_mut(&task_id)
+                    .expect("Knot internal error: queue has taskId but table does not have task");
+
                 match task {
-                    task_scheduler::Task::Scheduled { callback, args, .. } => {
-                        let value = v8::Local::new(&mut self.context_scope, callback);
+                    Task::Once { timeout, callback } => {
+                        let tasks_queue = self.tasks_queue.clone();
+                        let timeout: u64 = (*timeout).into();
+                        let callback_id: i32 = (*callback).into();
+                        std::thread::spawn(move || {
+                            sleep(time::Duration::from_millis(timeout));
+                            tasks_queue.lock().unwrap().enqueue(callback_id);
+                        });
+                    }
+                    Task::Periodic { interval, callback } => {
+                        let tasks_queue = self.tasks_queue.clone();
+                        let timeout: u64 = (*interval).into();
+                        let callback_id: i32 = (*callback).into();
+                        std::thread::spawn(move || {
+                            sleep(time::Duration::from_millis(timeout));
+                            let mut tasks_queue = tasks_queue.lock().unwrap();
+                            tasks_queue.enqueue(task_id);
+                            tasks_queue.enqueue(callback_id); // scheduling again
+                        });
+                    }
+                    Task::Script { source } => {
+                        Self::execute_script(&mut self.context_scope, source);
+                    }
+                    Task::CallBack { value, args } => {
+                        let value = value.clone();
+                        let global = self.context.global(&mut self.context_scope);
+                        let value = v8::Local::new(&mut self.context_scope, value.clone());
                         let callback_fn = v8::Local::<v8::Function>::try_from(value)
                             .expect("Task callback must be a function!");
 
                         let mut args_buff = vec![];
                         for arg in args {
-                            let local_handle = v8::Local::new(&mut self.context_scope, arg);
+                            let local_handle = v8::Local::new(&mut self.context_scope, arg.clone());
                             args_buff.push(local_handle);
                         }
 
@@ -94,27 +150,13 @@ where
                     }
                 }
             }
-        }
-    }
-
-    pub fn run_microtasks(&mut self) -> () {
-        self.context_scope.perform_microtask_checkpoint();
-    }
-
-    pub fn run_event_loop(&mut self) -> () {
-        loop {
-            // TODO: not quite correct, run microtasks checkpoint after every task.
             self.run_microtasks();
-            self.run_tasks();
-            if !self.scheduler.has_pending_tasks() {
-                break;
-            }
         }
     }
 
-    pub fn execute_script(&mut self, script: String) {
-        let script = v8::String::new(&mut self.context_scope, &script).unwrap();
-        let scope = &mut v8::HandleScope::new(&mut self.context_scope);
+    fn execute_script(context_scope: &mut v8::ContextScope<'b, v8::HandleScope<'a>>, script: &str) {
+        let script = v8::String::new(context_scope, &script).unwrap();
+        let scope = &mut v8::HandleScope::new(context_scope);
         let try_catch = &mut v8::TryCatch::new(scope);
 
         let script =
@@ -142,12 +184,19 @@ where
         );
 
         global.set(
-            v8::String::new(scope, "schedule_task").unwrap().into(),
+            v8::String::new(scope, "scheduleTask").unwrap().into(),
             v8::FunctionTemplate::new(scope, ops::schedule_task).into(),
         );
 
         global.set(
-            v8::String::new(scope, "forget_task").unwrap().into(),
+            v8::String::new(scope, "schedulePeriodicTask")
+                .unwrap()
+                .into(),
+            v8::FunctionTemplate::new(scope, ops::schedule_periodic_task).into(),
+        );
+
+        global.set(
+            v8::String::new(scope, "forgetTask").unwrap().into(),
             v8::FunctionTemplate::new(scope, ops::forget_task).into(),
         );
 
