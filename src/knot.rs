@@ -19,6 +19,7 @@ pub struct Knot<'a, 'b> {
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
     tasks_table: Arc<Mutex<TasksTable>>,
     tasks_queue: Arc<Mutex<TasksQueue>>,
+    active_timers: Arc<()>,
 }
 type V8Instance = v8::OwnedIsolate;
 
@@ -58,6 +59,7 @@ where
             context,
             tasks_table: Arc::new(Mutex::new(TasksTable::new())),
             tasks_queue: Arc::new(Mutex::new(TasksQueue::new())),
+            active_timers: Arc::new(()),
         });
 
         let knot_ptr = self_.as_mut() as *mut Self;
@@ -90,48 +92,54 @@ where
         self.context_scope.perform_microtask_checkpoint();
     }
 
-    fn has_tasks(&self) -> bool {
-        self.tasks_queue.lock().unwrap().0.len() > 0
+    fn pending_tasks(&self) -> usize {
+        let tasks_count = self.tasks_queue.lock().unwrap().0.len();
+        tasks_count + Arc::strong_count(&self.active_timers) - 1
     }
 
     pub fn run_event_loop(&mut self) -> () {
-        while self.has_tasks() {
+        while self.pending_tasks() > 0 {
             // Just to make sure that we don't hold onto the lock longer than required
             {
                 let task_id = {
                     let mut tasks_queue = self.tasks_queue.lock().unwrap();
-                    let task_id = tasks_queue.0.pop_front().unwrap();
-                    tasks_queue.dequeue(); // remove the task from the queue
+                    let task_id = match tasks_queue.dequeue() {
+                        Some(id) => id,
+                        None => continue,
+                    };
                     task_id
                 };
-                let mut tasks_table = self.tasks_table.lock().unwrap();
-                let task = tasks_table
-                    .as_mut(&task_id)
-                    .expect("Knot internal error: queue has taskId but table does not have task");
+
+                let task = match self.tasks_table.lock().unwrap().as_mut(&task_id) {
+                    // If we don't clone here, then any task which wants to register task
+                    // will create a dead lock
+                    Some(task) => task.clone(),
+                    None => continue,
+                };
 
                 match task {
                     Task::Once { timeout, callback } => {
                         let tasks_queue = self.tasks_queue.clone();
-                        let timeout: u64 = (*timeout).into();
-                        let callback_id: i32 = (*callback).into();
+                        let timer = self.active_timers.clone();
                         std::thread::spawn(move || {
-                            sleep(time::Duration::from_millis(timeout));
-                            tasks_queue.lock().unwrap().enqueue(callback_id);
+                            sleep(time::Duration::from_millis(timeout.into()));
+                            tasks_queue.lock().unwrap().enqueue(callback.into());
+                            drop(timer);
                         });
                     }
                     Task::Periodic { interval, callback } => {
                         let tasks_queue = self.tasks_queue.clone();
-                        let timeout: u64 = (*interval).into();
-                        let callback_id: i32 = (*callback).into();
+                        let timer = self.active_timers.clone();
                         std::thread::spawn(move || {
-                            sleep(time::Duration::from_millis(timeout));
+                            sleep(time::Duration::from_millis(interval.into()));
                             let mut tasks_queue = tasks_queue.lock().unwrap();
-                            tasks_queue.enqueue(task_id);
-                            tasks_queue.enqueue(callback_id); // scheduling again
+                            tasks_queue.enqueue(callback.into());
+                            tasks_queue.enqueue(task_id); // scheduling again
+                            drop(timer);
                         });
                     }
                     Task::Script { source } => {
-                        Self::execute_script(&mut self.context_scope, source);
+                        self.execute_script(&source);
                     }
                     Task::CallBack { value, args } => {
                         let value = value.clone();
@@ -154,14 +162,15 @@ where
         }
     }
 
-    fn execute_script(context_scope: &mut v8::ContextScope<'b, v8::HandleScope<'a>>, script: &str) {
-        let script = v8::String::new(context_scope, &script).unwrap();
-        let scope = &mut v8::HandleScope::new(context_scope);
+    fn execute_script(&mut self, script: &str) -> () {
+        let script = v8::String::new(&mut self.context_scope, &script).unwrap();
+        let scope = &mut v8::HandleScope::new(&mut self.context_scope);
         let try_catch = &mut v8::TryCatch::new(scope);
 
         let script =
             v8::Script::compile(try_catch, script, None).expect("Failed to run the script.");
 
+        // TODO: return value of script evaluation
         if script.run(try_catch).is_none() {
             let exception = try_catch.exception().unwrap();
             let exception_str = exception

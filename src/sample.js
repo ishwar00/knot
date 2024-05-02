@@ -18,13 +18,21 @@ let future = new Promise((res, _) => {
 });
 
 Knot.log(future);
-Knot.forgetTask(taskId);
-// Knot.schedulePeriodicTask(() => Knot.log("periodic"), 1000);
+const periodicId = Knot.schedulePeriodicTask(() => Knot.log("periodic"), 1000);
+Knot.scheduleTask(() => {
+    Knot.log("cancelling periodic task");
+    Knot.forgetTask(periodicId);
+}, 1000 * 4);
 
 // Hello, World! 343
 // executing future
 // [object Promise]
 // executing future in then:  455
+// periodic
 // Hello from task then
+// periodic
+// periodic
+// cancelling periodic task
+// periodic
 // Hello from task
 // Nested bruh
