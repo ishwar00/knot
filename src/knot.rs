@@ -114,13 +114,13 @@ where
                     // If we don't clone here, then any task which wants to register task
                     // will create a dead lock
                     Some(task) => task.clone(),
-                    None => continue,
+                    None => continue, // Task must have been removed
                 };
 
                 match task {
                     Task::Once { timeout, callback } => {
-                        let tasks_queue = self.tasks_queue.clone();
-                        let timer = self.active_timers.clone();
+                        let tasks_queue = Arc::clone(&self.tasks_queue);
+                        let timer = Arc::clone(&self.active_timers);
                         std::thread::spawn(move || {
                             sleep(time::Duration::from_millis(timeout.into()));
                             tasks_queue.lock().unwrap().enqueue(callback.into());
@@ -128,8 +128,8 @@ where
                         });
                     }
                     Task::Periodic { interval, callback } => {
-                        let tasks_queue = self.tasks_queue.clone();
-                        let timer = self.active_timers.clone();
+                        let tasks_queue = Arc::clone(&self.tasks_queue);
+                        let timer = Arc::clone(&self.active_timers);
                         std::thread::spawn(move || {
                             sleep(time::Duration::from_millis(interval.into()));
                             let mut tasks_queue = tasks_queue.lock().unwrap();
@@ -142,7 +142,6 @@ where
                         self.execute_script(&source);
                     }
                     Task::CallBack { value, args } => {
-                        let value = value.clone();
                         let global = self.context.global(&mut self.context_scope);
                         let value = v8::Local::new(&mut self.context_scope, value.clone());
                         let callback_fn = v8::Local::<v8::Function>::try_from(value)
