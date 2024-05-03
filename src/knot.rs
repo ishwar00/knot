@@ -17,15 +17,11 @@ const KNOT_INIT: Once = Once::new();
 pub struct Knot<'a, 'b> {
     context: v8::Local<'a, v8::Context>,
     context_scope: v8::ContextScope<'b, v8::HandleScope<'a>>,
-    tasks_table: Arc<Mutex<TasksTable>>,
+    tasks_table: TasksTable,
     tasks_queue: Arc<Mutex<TasksQueue>>,
     active_timers: Arc<()>,
 }
 type V8Instance = v8::OwnedIsolate;
-
-struct EmbeddedData<'a, 'b> {
-    ptr: Arc<Mutex<*mut Knot<'a, 'b>>>,
-}
 
 impl<'a, 'b> Knot<'a, 'b>
 where
@@ -57,31 +53,20 @@ where
         let mut self_ = Box::new(Self {
             context_scope,
             context,
-            tasks_table: Arc::new(Mutex::new(TasksTable::new())),
+            tasks_table: TasksTable::new(),
             tasks_queue: Arc::new(Mutex::new(TasksQueue::new())),
             active_timers: Arc::new(()),
         });
 
         let knot_ptr = self_.as_mut() as *mut Self;
 
-        let embedded_data = Box::new(EmbeddedData {
-            ptr: Arc::new(std::sync::Mutex::new(knot_ptr)),
-        });
-
-        let embedded_data_ptr = Box::leak(embedded_data);
-
-        unsafe {
-            context.set_aligned_pointer_in_embedder_data(
-                0,
-                embedded_data_ptr as *mut EmbeddedData as *mut c_void,
-            )
-        };
+        unsafe { context.set_aligned_pointer_in_embedder_data(0, knot_ptr as *mut c_void) };
 
         self_
     }
 
     pub fn register(&mut self, task: Task) -> TaskId {
-        self.tasks_table.lock().unwrap().register(task)
+        self.tasks_table.register(task)
     }
 
     pub fn enqueue(&mut self, item: TaskId) -> () {
@@ -110,7 +95,7 @@ where
                     task_id
                 };
 
-                let task = match self.tasks_table.lock().unwrap().as_mut(&task_id) {
+                let task = match self.tasks_table.as_mut(&task_id) {
                     // If we don't clone here, then any task which wants to register task
                     // will create a dead lock
                     Some(task) => task.clone(),

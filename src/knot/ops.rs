@@ -1,6 +1,6 @@
 use v8::{self};
 
-use super::{tasks::Task, EmbeddedData};
+use super::{tasks::Task, Knot};
 
 pub fn print(
     scope: &mut v8::HandleScope,
@@ -46,20 +46,19 @@ pub fn schedule_periodic_task(
         global_args.push(global_handle);
     }
 
-    let embedded_data = data as *mut EmbeddedData;
+    let knot_ptr = data as *mut Knot;
     let callback = Task::CallBack {
         value: v8::Global::new(scope, args.get(0)),
         args: global_args,
     };
     let task_id = unsafe {
-        let knot_ptr = (*embedded_data).ptr.lock().unwrap();
-        let mut tasks_table = (**knot_ptr).tasks_table.lock().unwrap();
+        let tasks_table = &mut (*knot_ptr).tasks_table;
         let callback_id = tasks_table.register(callback); // register the callback as task
         let id = tasks_table.register(Task::Periodic {
             interval,
             callback: callback_id,
         });
-        (**knot_ptr).tasks_queue.lock().unwrap().enqueue(id);
+        (*knot_ptr).tasks_queue.lock().unwrap().enqueue(id);
         id
     };
 
@@ -82,7 +81,6 @@ pub fn schedule_task(
         .unwrap_or(0);
 
     let context = v8::HandleScope::get_current_context(scope);
-    let data = context.get_aligned_pointer_from_embedder_data(0);
 
     let mut global_args = vec![];
 
@@ -91,20 +89,20 @@ pub fn schedule_task(
         global_args.push(global_handle);
     }
 
-    let embedded_data = data as *mut EmbeddedData;
     let callback = Task::CallBack {
         value: v8::Global::new(scope, args.get(0)),
         args: global_args,
     };
+    let data = context.get_aligned_pointer_from_embedder_data(0);
+    let knot_ptr = data as *mut Knot;
     let task_id = unsafe {
-        let knot_ptr = (*embedded_data).ptr.lock().unwrap();
-        let mut tasks_table = (**knot_ptr).tasks_table.lock().unwrap();
+        let tasks_table = &mut (*knot_ptr).tasks_table;
         let callback_id = tasks_table.register(callback); // register the callback as task
         let id = tasks_table.register(Task::Once {
             timeout,
             callback: callback_id,
         });
-        (**knot_ptr).tasks_queue.lock().unwrap().enqueue(id);
+        (*knot_ptr).tasks_queue.lock().unwrap().enqueue(id);
         id
     };
 
@@ -122,15 +120,9 @@ pub fn forget_task(
             let context = v8::HandleScope::get_current_context(scope);
             let data = context.get_aligned_pointer_from_embedder_data(0);
 
-            let embedded_data = data as *mut EmbeddedData;
-
+            let knot_ptr = data as *mut Knot;
             unsafe {
-                let knot_ptr = (*embedded_data).ptr.lock().unwrap();
-                (**knot_ptr)
-                    .tasks_table
-                    .lock()
-                    .unwrap()
-                    .unregister(&task_id);
+                (*knot_ptr).tasks_table.unregister(&task_id);
             };
         }
     }
